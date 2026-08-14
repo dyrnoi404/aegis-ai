@@ -1,5 +1,19 @@
 <!-- name: README.md -->
 
+<p align="center">
+  <img src="assets/banner.svg" alt="AEGIS AI" width="780" />
+</p>
+
+<p align="center">
+  <a href="#english">🇬🇧 English</a> · <a href="#russian">🇷🇺 Русский</a>
+</p>
+
+---
+
+<details open>
+  <summary><strong id="english">🇬🇧 English (default)</strong></summary>
+
+
 # AEGIS AI
 
 ![AEGIS Banner](assets/banner.svg)
@@ -81,8 +95,8 @@ python -m cli.aegis
 
 Project layout
 
-- README.md — this file (English)
-- README.ru.md — Russian translation
+- README.md — this file (bilingual)
+- README.ru.md — kept for quick perusal (mirrored)
 - i18n/ — localized docs (en/ru)
 - backend/ — core Python packages and agents
 - cli/ — command line entrypoints
@@ -98,6 +112,83 @@ License
 
 AEGIS AI is released under the MIT License. See LICENSE.
 
+</details>
+
 ---
 
-If you prefer the Russian main README, see README.ru.md.
+<details>
+  <summary><strong id="russian">🇷🇺 Русский</strong></summary>
+
+
+# AEGIS AI
+
+![AEGIS Banner](assets/banner.svg)
+
+Локальный помощник по кибербезопасности
+
+Private. Local. Transparent.
+
+AEGIS AI — приватная локальная платформа-инструмент для специалистов по информационной безопасности. Она помогает анализировать логи, проверять код, формировать отчёты и выполнять локальные AI-аналитики без отправки конфиденциальных данных к сторонним сервисам.
+
+Почему AEGIS?
+
+- Работает локально — ваши данные остаются у вас
+- Модульная архитектура — вы легко замените или расширите компоненты (AI, хранилище векторов, память)
+- Расширяемость — плагины, CLI и будущая десктоп-версия
+- Сфокусировано на потребностях аудиторов и специалистов по безопасности (Kali/Debian)
+
+Матрица возможностей
+
+| Модуль | Статус |
+|---|---:|
+| Локальный AI движок | 🚧 В разработке |
+| CLI-помощник | ✅ Минимальная версия |
+| Десктоп-приложение | 🔜 В планах |
+| Анализ логов | 🔜 В планах |
+| Ревью кода | 🔜 В планах |
+| База знаний | 🔜 В планах |
+| Система плагинов | 🔜 В планах |
+
+Быстрый старт (CLI)
+
+```bash
+python -m cli.aegis
+# или
+./cli/aegis
+```
+
+Архитектура (упрощённо)
+
+```mermaid
+flowchart LR
+  API[API сервис (FastAPI)]
+  AI[AI движок (локальный)]
+  DB[Postgres]
+  VEC[Vector Store]
+
+  API --> AI
+  API --> DB
+  API --> VEC
+```
+
+Установка
+
+Рекомендуется использовать Docker Compose:
+
+1. Клонировать репозиторий
+2. docker compose up --build
+
+Для разработки (виртуальное окружение):
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+python -m cli.aegis
+```
+
+Лицензия
+
+Проект распространяется под лицензией MIT. Смотрите LICENSE.
+
+</details>
