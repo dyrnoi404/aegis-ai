@@ -107,7 +107,7 @@ When user queries or automated tasks activate this skill, execute the designated
      * Differentiate between `127.0.0.1` (loopback) and `0.0.0.0` / `::` (unrestricted external ingress).
      * Verify SSH daemon configuration (`PermitRootLogin no`, `PasswordAuthentication no`).
 3. **CIS Score Formulation**:
-   * Compute the weighted posture score (0–100) and assign letter grade (A/B/C/D/F).
+   * Compute the weighted posture score (0-100) and assign letter grade (A/B/C/D/F).
 
 ---
 
@@ -140,7 +140,7 @@ When user queries or automated tasks activate this skill, execute the designated
 1. **CVSS v3.1 Quantification**:
    * For every identified defect, formulate the vector string:
      $$\text{Vector: } \text{CVSS:3.1/AV:[N|A|L|P]/AC:[L|H]/PR:[N|L|H]/UI:[N|R]/S:[U|C]/C:[N|L|H]/I:[N|L|H]/A:[N|L|H]}$$
-   * Classify Severity: **Low** (0.1–3.9), **Medium** (4.0–6.9), **High** (7.0–8.9), **Critical** (9.0–10.0).
+   * Classify Severity: **Low** (0.1-3.9), **Medium** (4.0-6.9), **High** (7.0-8.9), **Critical** (9.0-10.0).
 2. **Structured Incident / Audit Report Layout**:
    * **Executive Summary**: High-level posture assessment, overall grade, business impact.
    * **Threat Matrix**: Tabular breakdown of findings (Vulnerability, CWE, CVSS, MITRE ATT&CK TTP, Location).

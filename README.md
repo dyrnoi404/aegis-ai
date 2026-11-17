@@ -64,7 +64,7 @@ Built on foundational principles from academic and practical information securit
   * **Full RELRO**: GOT/PLT read-only protection (`PT_GNU_RELRO` & `BIND_NOW`).
 * **Kernel Protections**: Validates ASLR (`randomize_va_space=2`), SUID core dump restrictions (`fs.suid_dumpable=0`), pointer hiding (`kernel.kptr_restrict=2`), and dmesg protection.
 * **Privilege Surfaces & Capabilities**: Audits SUID binaries against GTFOBins, discovers dangerous Linux file capabilities (`cap_setuid`), and audits file permissions.
-* **CIS Hardening Score**: Computes a deterministic 0–100 posture score and letter grade.
+* **CIS Hardening Score**: Computes a deterministic 0-100 posture score and letter grade.
 
 ### 3. 📑 Incident Forensics & SIEM Correlation (`scripts/aegis_triage.py`)
 * **Sliding Time-Window Correlation**: Aggregates log events within a 10-minute window to identify multi-stage attack chains:
