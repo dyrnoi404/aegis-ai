@@ -1,10 +1,6 @@
 #!/usr/bin/env python3
 """
-AEGIS AI - SAST & Secret Guard Engine (Enterprise Edition)
-Combines Shannon Entropy heuristics, Python AST structural vulnerability inspection,
-and high-precision cryptographic credential detection.
-
-Compliant with OWASP Top 10:2021 & CWE Top 25 standards.
+Static Application Security Testing (SAST) and credential scanner.
 """
 
 import os
@@ -16,11 +12,7 @@ import json
 import argparse
 from pathlib import Path
 from collections import Counter
-from typing import List, Dict, Any, Generator, Optional
-
-# ==============================================================================
-# 1. CRYPTOGRAPHIC & TOKEN REGEX MATRIX (CWE-798)
-# ==============================================================================
+from typing import List, Dict, Any, Generator
 
 TOKEN_RULES = [
     {
@@ -112,12 +104,7 @@ IGNORE_EXTENSIONS = {
 MAX_FILE_SIZE_BYTES = 5 * 1024 * 1024
 
 
-# ==============================================================================
-# 2. SHANNON ENTROPY DETECTOR
-# ==============================================================================
-
 def shannon_entropy(data: str) -> float:
-    """Calculates Shannon entropy: H = -sum(p_i * log2(p_i))"""
     if not data:
         return 0.0
     entropy = 0.0
@@ -130,19 +117,14 @@ def shannon_entropy(data: str) -> float:
 
 
 def is_high_entropy_token(token: str) -> bool:
-    """Evaluates if a string literal has the hallmarks of a raw secret key."""
     if len(token) < 20 or len(token) > 120:
         return False
-    # Exclude common natural language or formatting patterns
     if " " in token or "/" in token or "\\" in token or token.startswith("http"):
         return False
-    entropy = shannon_entropy(token)
-    # Base64/Hex high entropy threshold typically >= 4.5 for random data
-    return entropy >= 4.5
+    return shannon_entropy(token) >= 4.5
 
 
 def mask_secret(value: str) -> str:
-    """Masks secrets for zero-leakage reporting."""
     if len(value) <= 8:
         return "********"
     return f"{value[:4]}...{value[-4:]}"
@@ -157,16 +139,7 @@ def is_binary(filepath: Path) -> bool:
         return True
 
 
-# ==============================================================================
-# 3. AST STATIC APPLICATION SECURITY TESTING (SAST) ENGINE
-# ==============================================================================
-
 class PythonSecurityVisitor(ast.NodeVisitor):
-    """
-    AST Visitor auditing Python codebases for structural security anti-patterns
-    as formulated by Andrew Hoffman (Web Application Security).
-    """
-
     def __init__(self, filepath: str, lines: List[str]):
         self.filepath = filepath
         self.lines = lines
@@ -184,9 +157,6 @@ class PythonSecurityVisitor(ast.NodeVisitor):
         elif isinstance(node.func, ast.Attribute):
             func_name = node.func.attr
 
-        # ----------------------------------------------------------------------
-        # CWE-78: OS Command Injection
-        # ----------------------------------------------------------------------
         if func_name in ("system", "popen"):
             self.findings.append({
                 "id": "AEGIS-SAST-001",
@@ -200,7 +170,6 @@ class PythonSecurityVisitor(ast.NodeVisitor):
                 "remediation": "Replace with subprocess.run() using a strict argument list and shell=False."
             })
         elif func_name in ("Popen", "call", "check_call", "check_output", "run"):
-            # Check for shell=True keyword argument
             for kw in node.keywords:
                 if kw.arg == "shell" and isinstance(kw.value, ast.Constant) and kw.value.value is True:
                     self.findings.append({
@@ -215,9 +184,6 @@ class PythonSecurityVisitor(ast.NodeVisitor):
                         "remediation": "Set shell=False and pass arguments as an immutable sequence/list."
                     })
 
-        # ----------------------------------------------------------------------
-        # CWE-95 / CWE-94: Code Injection (eval, exec)
-        # ----------------------------------------------------------------------
         if func_name in ("eval", "exec"):
             self.findings.append({
                 "id": "AEGIS-SAST-003",
@@ -231,11 +197,7 @@ class PythonSecurityVisitor(ast.NodeVisitor):
                 "remediation": "Eliminate dynamic code execution. Use ast.literal_eval() for safe data parsing."
             })
 
-        # ----------------------------------------------------------------------
-        # CWE-502: Insecure Deserialization (pickle, unsafe yaml)
-        # ----------------------------------------------------------------------
         if func_name in ("loads", "load"):
-            # Check module caller if attribute
             if isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name):
                 module_name = node.func.value.id
                 if module_name == "pickle":
@@ -251,7 +213,6 @@ class PythonSecurityVisitor(ast.NodeVisitor):
                         "remediation": "Do not deserialize untrusted data with pickle. Use HMAC-signed payloads or JSON."
                     })
                 elif module_name in ("yaml", "ruamel"):
-                    # Check if safe loader is omitted
                     has_safe_loader = any(
                         kw.arg == "Loader" and "SafeLoader" in getattr(kw.value, "id", "")
                         for kw in node.keywords
@@ -269,9 +230,6 @@ class PythonSecurityVisitor(ast.NodeVisitor):
                             "remediation": "Always use yaml.safe_load() or specify Loader=yaml.SafeLoader."
                         })
 
-        # ----------------------------------------------------------------------
-        # CWE-89: SQL Injection Detection via cursor.execute() with string formatting
-        # ----------------------------------------------------------------------
         if func_name == "execute" and node.args:
             first_arg = node.args[0]
             if isinstance(first_arg, (ast.BinOp, ast.JoinedStr)):
@@ -287,9 +245,6 @@ class PythonSecurityVisitor(ast.NodeVisitor):
                     "remediation": "Use parameterized queries with prepared statements (e.g., execute(sql, (param,)))"
                 })
 
-        # ----------------------------------------------------------------------
-        # CWE-327: Broken / Deprecated Cryptographic Hash Functions
-        # ----------------------------------------------------------------------
         if func_name in ("md5", "sha1"):
             self.findings.append({
                 "id": "AEGIS-SAST-007",
@@ -325,10 +280,6 @@ def scan_file_sast(filepath: Path) -> List[Dict[str, Any]]:
     return findings
 
 
-# ==============================================================================
-# 4. REGEX & ENTROPY SCANNER
-# ==============================================================================
-
 def scan_file_secrets(filepath: Path) -> List[Dict[str, Any]]:
     findings = []
     try:
@@ -340,7 +291,6 @@ def scan_file_secrets(filepath: Path) -> List[Dict[str, Any]]:
 
         content = "".join(lines)
 
-        # 1. Regex Token Rules
         for rule in TOKEN_RULES:
             for match in rule["pattern"].finditer(content):
                 start_pos = match.start()
@@ -360,13 +310,10 @@ def scan_file_secrets(filepath: Path) -> List[Dict[str, Any]]:
                     "remediation": "Revoke token immediately and inject credentials via environment variables."
                 })
 
-        # 2. Shannon Entropy String Literal Scan
         for idx, line in enumerate(lines, start=1):
-            # Extract quoted literals
             literals = re.findall(r"""["']([A-Za-z0-9+/=_-]{24,100})["']""", line)
             for lit in literals:
                 if is_high_entropy_token(lit):
-                    # Check if already caught by regex
                     if not any(f["line"] == idx and f["cwe"] == "CWE-798" for f in findings):
                         findings.append({
                             "id": "AEGIS-ENT-001",
@@ -404,22 +351,14 @@ def scan_target(target_path: str) -> List[Dict[str, Any]]:
 
     all_findings = []
     for file_path in walk_target(target):
-        # 1. Regex & Shannon entropy scan
         all_findings.extend(scan_file_secrets(file_path))
-        # 2. AST structural SAST scan
         all_findings.extend(scan_file_sast(file_path))
 
     return all_findings
 
 
-# ==============================================================================
-# 5. CLI & REPORTING INTERFACE
-# ==============================================================================
-
 def main():
-    parser = argparse.ArgumentParser(
-        description="AEGIS AI - SAST & Secret Guard (Enterprise Edition)"
-    )
+    parser = argparse.ArgumentParser(description="AEGIS SAST and Secret Scanner")
     parser.add_argument("target", nargs="?", default=".", help="Directory or file to scan")
     parser.add_argument("--json", action="store_true", help="Output results in JSON format")
     parser.add_argument("--fail-on-findings", action="store_true", help="Exit code 1 if vulnerabilities found")
@@ -441,27 +380,16 @@ def main():
         }, indent=2))
         return
 
-    print("\n╔═══════════════════════════════════════════════════════════════════════╗")
-    print("║               AEGIS AI - SAST & Secret Guard (v2.0)                   ║")
-    print("╚═══════════════════════════════════════════════════════════════════════╝")
-    print(f" Target Path:     {Path(args.target).resolve()}")
-    print(f" Total Findings:  {len(findings)}\n")
+    print(f"\nTarget Path:    {Path(args.target).resolve()}")
+    print(f"Total Findings: {len(findings)}\n")
 
     if not findings:
-        print("\033[92m[✓] CLEAN AUDIT: No high-entropy secrets, leaked tokens, or critical AST flaws detected.\033[0m\n")
+        print("[OK] Clean audit: no secrets or AST flaws detected.\n")
     else:
         for f in findings:
             sev = f["severity"]
-            if sev == "CRITICAL":
-                color = "\033[91m"
-            elif sev == "HIGH":
-                color = "\033[93m"
-            elif sev == "MEDIUM":
-                color = "\033[94m"
-            else:
-                color = "\033[90m"
+            color = "\033[91m" if sev == "CRITICAL" else ("\033[93m" if sev == "HIGH" else "\033[94m")
             reset = "\033[0m"
-
             print(f"[{color}{sev:<8}{reset}] {f['rule']} [{f['cwe']}] ({f['id']})")
             print(f"  Location:    {f['file']}:{f['line']}")
             print(f"  Snippet:     {f['preview']}")

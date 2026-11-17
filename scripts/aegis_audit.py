@@ -1,10 +1,6 @@
 #!/usr/bin/env python3
 """
-AEGIS AI - Deep Host Posture & Hardening Auditor (Enterprise Edition)
-Conducts non-destructive system audits, native ELF binary exploit mitigation checks
-(Checksec: NX, Canary, PIE, RELRO), Linux Capabilities inspection, and kernel posture evaluation.
-
-Based on CIS Linux Benchmarks and low-level binary exploitation models (John Erickson).
+Host security posture, binary mitigations (Checksec), and kernel parameter auditor.
 """
 
 import os
@@ -15,30 +11,27 @@ import socket
 import subprocess
 import argparse
 from pathlib import Path
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Optional
 
-# ==============================================================================
-# 1. NATIVE ELF BINARY CHECKSEC ENGINE (John Erickson Model)
-# ==============================================================================
-
-# ELF Program Header Types
 PT_LOAD = 1
 PT_DYNAMIC = 2
 PT_GNU_STACK = 0x6474E551
 PT_GNU_RELRO = 0x6474E552
 
-# ELF Dynamic Section Tags
 DT_FLAGS = 30
 DT_FLAGS_1 = 0x6FFFFFFB
 DF_BIND_NOW = 0x00000008
 DF_1_NOW = 0x00000001
 
+GTFOBINS_TARGETS = {
+    "bash", "sh", "dash", "zsh", "python", "python3", "perl", "ruby",
+    "lua", "vim", "vi", "nano", "find", "tar", "zip", "gzip", "nmap",
+    "tcpdump", "awk", "sed", "gdb", "strace", "curl", "wget", "nc",
+    "netcat", "socat", "cp", "mv", "chmod", "chown", "env", "pkexec"
+}
+
 
 def analyze_elf_binary(filepath: Path) -> Optional[Dict[str, Any]]:
-    """
-    Parses ELF headers directly via struct unpacking to determine
-    compiler-level exploit mitigation flags without external dependencies.
-    """
     if not filepath.is_file() or filepath.is_symlink():
         return None
 
@@ -48,7 +41,7 @@ def analyze_elf_binary(filepath: Path) -> Optional[Dict[str, Any]]:
             if len(header) < 52 or header[:4] != b"\x7fELF":
                 return None
 
-            ei_class = header[4]  # 1 = 32-bit, 2 = 64-bit
+            ei_class = header[4]
             e_type = struct.unpack("<H", header[16:18])[0]
             is_64 = (ei_class == 2)
 
@@ -61,13 +54,11 @@ def analyze_elf_binary(filepath: Path) -> Optional[Dict[str, Any]]:
                 e_phentsize = struct.unpack("<H", header[42:44])[0]
                 e_phnum = struct.unpack("<H", header[44:46])[0]
 
-            # Read Program Headers
             f.seek(e_phoff)
             ph_data = f.read(e_phentsize * e_phnum)
 
             nx_enabled = True
             has_relro = False
-            has_bind_now = False
 
             for i in range(e_phnum):
                 offset = i * e_phentsize
@@ -83,19 +74,15 @@ def analyze_elf_binary(filepath: Path) -> Optional[Dict[str, Any]]:
                     p_flags = struct.unpack("<I", ph[24:28])[0]
 
                 if p_type == PT_GNU_STACK:
-                    # If PF_X (1) is set in flags, stack is executable -> NX disabled
                     if p_flags & 0x1:
                         nx_enabled = False
                 elif p_type == PT_GNU_RELRO:
                     has_relro = True
 
-            # Check Canary presence in symbol strings
             f.seek(0)
-            raw_content = f.read(2 * 1024 * 1024)  # Read up to 2MB for symbol table
+            raw_content = f.read(2 * 1024 * 1024)
             has_canary = b"__stack_chk_fail" in raw_content or b"__stack_chk_guard" in raw_content
 
-            # Determine PIE: ET_DYN (3) typically indicates PIE or shared library
-            pie_status = "PIE Enabled" if e_type == 3 else "No PIE"
             relro_status = "Full RELRO" if (has_relro and b"BIND_NOW" in raw_content) else ("Partial RELRO" if has_relro else "No RELRO")
 
             return {
@@ -135,14 +122,9 @@ def audit_critical_binaries() -> List[Dict[str, Any]]:
     return checks
 
 
-# ==============================================================================
-# 2. KERNEL & MEMORY PROTECTION AUDIT
-# ==============================================================================
-
 def audit_kernel_parameters() -> List[Dict[str, Any]]:
     checks = []
 
-    # 1. ASLR (randomize_va_space)
     p_aslr = Path("/proc/sys/kernel/randomize_va_space")
     if p_aslr.exists():
         try:
@@ -154,7 +136,7 @@ def audit_kernel_parameters() -> List[Dict[str, Any]]:
                     "status": "PASS",
                     "severity": "LOW",
                     "score": 10,
-                    "detail": "Full ASLR active (randomize_va_space=2). Randomizes stack, VDSO, shared libs, heap."
+                    "detail": "Full ASLR active (randomize_va_space=2)."
                 })
             else:
                 checks.append({
@@ -168,7 +150,6 @@ def audit_kernel_parameters() -> List[Dict[str, Any]]:
         except Exception:
             pass
 
-    # 2. SUID Core Dumps (fs.suid_dumpable)
     p_dump = Path("/proc/sys/fs/suid_dumpable")
     if p_dump.exists():
         try:
@@ -180,7 +161,7 @@ def audit_kernel_parameters() -> List[Dict[str, Any]]:
                     "status": "PASS",
                     "severity": "LOW",
                     "score": 10,
-                    "detail": "SUID core dumping disabled (fs.suid_dumpable=0). Prevents credential leakage via memory dumps."
+                    "detail": "SUID core dumping disabled (fs.suid_dumpable=0)."
                 })
             else:
                 checks.append({
@@ -194,7 +175,6 @@ def audit_kernel_parameters() -> List[Dict[str, Any]]:
         except Exception:
             pass
 
-    # 3. Kernel Pointer Exposure (kernel.kptr_restrict)
     p_kptr = Path("/proc/sys/kernel/kptr_restrict")
     if p_kptr.exists():
         try:
@@ -206,7 +186,7 @@ def audit_kernel_parameters() -> List[Dict[str, Any]]:
                     "status": "PASS",
                     "severity": "LOW",
                     "score": 10,
-                    "detail": f"Kernel pointers hidden from unprivileged processes (value={val})."
+                    "detail": f"Kernel pointers hidden (value={val})."
                 })
             else:
                 checks.append({
@@ -220,7 +200,6 @@ def audit_kernel_parameters() -> List[Dict[str, Any]]:
         except Exception:
             pass
 
-    # 4. Dmesg Restriction (kernel.dmesg_restrict)
     p_dmesg = Path("/proc/sys/kernel/dmesg_restrict")
     if p_dmesg.exists():
         try:
@@ -232,7 +211,7 @@ def audit_kernel_parameters() -> List[Dict[str, Any]]:
                     "status": "PASS",
                     "severity": "LOW",
                     "score": 10,
-                    "detail": "Kernel syslog/dmesg restricted to CAP_SYSLOG."
+                    "detail": "Kernel syslog/dmesg restricted to privileged callers."
                 })
             else:
                 checks.append({
@@ -249,22 +228,9 @@ def audit_kernel_parameters() -> List[Dict[str, Any]]:
     return checks
 
 
-# ==============================================================================
-# 3. PRIVILEGE ESCALATION SURFACES (SUID, Capabilities, Sudoers)
-# ==============================================================================
-
-GTFOBINS_TARGETS = {
-    "bash", "sh", "dash", "zsh", "python", "python3", "perl", "ruby",
-    "lua", "vim", "vi", "nano", "find", "tar", "zip", "gzip", "nmap",
-    "tcpdump", "awk", "sed", "gdb", "strace", "curl", "wget", "nc",
-    "netcat", "socat", "cp", "mv", "chmod", "chown", "env", "pkexec"
-}
-
-
 def audit_privilege_surfaces() -> List[Dict[str, Any]]:
     checks = []
 
-    # 1. SUID Binaries Audit
     bin_dirs = ["/bin", "/sbin", "/usr/bin", "/usr/sbin", "/usr/local/bin"]
     flagged_suids = []
     for b_dir in bin_dirs:
@@ -276,7 +242,7 @@ def audit_privilege_surfaces() -> List[Dict[str, Any]]:
                 if item.is_file() and not item.is_symlink():
                     try:
                         st = item.stat()
-                        if st.st_mode & 0o4000:  # SUID bit set
+                        if st.st_mode & 0o4000:
                             if item.name.lower() in GTFOBINS_TARGETS:
                                 flagged_suids.append(f"{item.name} ({item})")
                     except (PermissionError, FileNotFoundError):
@@ -291,7 +257,7 @@ def audit_privilege_surfaces() -> List[Dict[str, Any]]:
             "status": "WARN",
             "severity": "HIGH",
             "score": 5,
-            "detail": f"SUID binaries with known GTFOBins bypass vectors detected: {', '.join(flagged_suids[:4])}"
+            "detail": f"SUID binaries with known bypass vectors detected: {', '.join(flagged_suids[:4])}"
         })
     else:
         checks.append({
@@ -303,7 +269,6 @@ def audit_privilege_surfaces() -> List[Dict[str, Any]]:
             "detail": "No abnormal or high-risk SUID binaries found in standard search paths."
         })
 
-    # 2. Linux Capabilities Audit via getcap
     try:
         proc = subprocess.run(["getcap", "-r", "/usr/bin", "/bin"], capture_output=True, text=True, timeout=3)
         if proc.returncode == 0 and proc.stdout.strip():
@@ -316,7 +281,7 @@ def audit_privilege_surfaces() -> List[Dict[str, Any]]:
                     "status": "FAIL",
                     "severity": "CRITICAL",
                     "score": 0,
-                    "detail": f"Dangerous file capabilities detected: {', '.join(risky_caps[:2])}"
+                    "detail": f"Elevated file capabilities detected: {', '.join(risky_caps[:2])}"
                 })
             else:
                 checks.append({
@@ -325,12 +290,11 @@ def audit_privilege_surfaces() -> List[Dict[str, Any]]:
                     "status": "PASS",
                     "severity": "LOW",
                     "score": 10,
-                    "detail": "Standard bounded capabilities detected (ping/wireshark)."
+                    "detail": "Standard bounded capabilities detected."
                 })
     except Exception:
         pass
 
-    # 3. Critical Files Permissions
     p_shadow = Path("/etc/shadow")
     if p_shadow.exists():
         try:
@@ -341,7 +305,7 @@ def audit_privilege_surfaces() -> List[Dict[str, Any]]:
                     "status": "FAIL",
                     "severity": "CRITICAL",
                     "score": 0,
-                    "detail": "/etc/shadow is readable by unprivileged processes! Immediate remediation required."
+                    "detail": "/etc/shadow is readable by unprivileged processes."
                 })
         except PermissionError:
             checks.append({
@@ -355,10 +319,6 @@ def audit_privilege_surfaces() -> List[Dict[str, Any]]:
 
     return checks
 
-
-# ==============================================================================
-# 4. NETWORK BOUNDARY & SSH POSTURE
-# ==============================================================================
 
 def audit_network_surface() -> List[Dict[str, Any]]:
     checks = []
@@ -385,7 +345,7 @@ def audit_network_surface() -> List[Dict[str, Any]]:
             "status": "WARN",
             "severity": "MEDIUM",
             "score": 6,
-            "detail": f"Active listeners on 0.0.0.0/*: ports {', '.join(unrestricted_ports[:5])}. Verify if firewalled."
+            "detail": f"Active listeners on 0.0.0.0/*: ports {', '.join(unrestricted_ports[:5])}."
         })
     else:
         checks.append({
@@ -397,7 +357,6 @@ def audit_network_surface() -> List[Dict[str, Any]]:
             "detail": "All active TCP listeners are strictly bound to localhost loopback interfaces."
         })
 
-    # SSH Configuration
     sshd_conf = Path("/etc/ssh/sshd_config")
     if sshd_conf.exists():
         try:
@@ -416,7 +375,7 @@ def audit_network_surface() -> List[Dict[str, Any]]:
                     "status": "FAIL",
                     "severity": "HIGH",
                     "score": 0,
-                    "detail": "PermitRootLogin is configured to 'yes'. Remediate: set to 'no' or 'prohibit-password'."
+                    "detail": "PermitRootLogin is configured to 'yes'."
                 })
             else:
                 checks.append({
@@ -432,10 +391,6 @@ def audit_network_surface() -> List[Dict[str, Any]]:
 
     return checks
 
-
-# ==============================================================================
-# 5. ORCHESTRATION & SCORING
-# ==============================================================================
 
 def execute_host_audit() -> Dict[str, Any]:
     all_checks = []
@@ -467,9 +422,7 @@ def execute_host_audit() -> Dict[str, Any]:
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="AEGIS AI - Deep Host Posture & Hardening Auditor (Enterprise Edition)"
-    )
+    parser = argparse.ArgumentParser(description="AEGIS Host Hardening and Binary Posture Auditor")
     parser.add_argument("--json", action="store_true", help="Output full results in JSON format")
     args = parser.parse_args()
 
@@ -479,12 +432,9 @@ def main():
         print(json.dumps(results, indent=2))
         return
 
-    print("\n╔═══════════════════════════════════════════════════════════════════════╗")
-    print("║          AEGIS AI - Deep Host Posture & Hardening Auditor             ║")
-    print("╚═══════════════════════════════════════════════════════════════════════╝")
-    print(f" Target Hostname:      {results['hostname']}")
-    print(f" CIS Hardening Score:  {results['score']}/100 (Grade: {results['grade']})")
-    print(f" Total Audits Run:     {results['checks_total']}\n")
+    print(f"\nTarget Hostname:     {results['hostname']}")
+    print(f"Hardening Score:     {results['score']}/100 (Grade: {results['grade']})")
+    print(f"Total Audits Run:    {results['checks_total']}\n")
 
     print(f"{'DOMAIN':<20} {'STATUS':<8} {'SEVERITY':<10} {'CHECK':<30} {'DETAILS'}")
     print("-" * 100)

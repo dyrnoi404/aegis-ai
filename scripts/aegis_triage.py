@@ -1,10 +1,6 @@
 #!/usr/bin/env python3
 """
-AEGIS AI - Incident Forensics & SIEM Correlation Engine (Enterprise Edition)
-Multi-stage log analysis, sliding time-window correlation, MITRE ATT&CK tagging,
-IoC extraction, and automated firewall mitigation rule generation.
-
-Compliant with NIST SP 800-61 Rev. 2 (Detection & Analysis Phase).
+Incident forensics and SIEM event correlation engine.
 """
 
 import sys
@@ -12,13 +8,9 @@ import re
 import json
 import argparse
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime
 from collections import defaultdict
-from typing import Dict, Any, List, Optional, Tuple
-
-# ==============================================================================
-# 1. MITRE ATT&CK® TAXONOMY & SIGNATURES
-# ==============================================================================
+from typing import Dict, Any, List
 
 MITRE_TECHNIQUES = {
     "SSH_BRUTE_FORCE": {
@@ -74,10 +66,6 @@ SUSPICIOUS_PATHS = [
 ]
 
 
-# ==============================================================================
-# 2. SLIDING TIME-WINDOW EVENT CORRELATION (SIEM Engine)
-# ==============================================================================
-
 class TimestampedEvent:
     def __init__(self, raw_ts: str, event_type: str, ip: str, user: str, details: Dict[str, Any]):
         self.raw_ts = raw_ts
@@ -88,7 +76,6 @@ class TimestampedEvent:
         self.timestamp = self._parse_timestamp(raw_ts)
 
     def _parse_timestamp(self, ts_str: str) -> datetime:
-        # Standard syslog format: 'Nov 17 19:22:01'
         current_year = datetime.now().year
         try:
             return datetime.strptime(f"{current_year} {ts_str}", "%Y %b %d %H:%M:%S")
@@ -97,10 +84,6 @@ class TimestampedEvent:
 
 
 def correlate_auth_events(events: List[TimestampedEvent]) -> List[Dict[str, Any]]:
-    """
-    Correlates events across a sliding 10-minute window to identify:
-    Multi-stage attack chains: Brute Force (T1110) -> Account Takeover (T1078)
-    """
     correlated_incidents = []
     events_by_ip = defaultdict(list)
 
@@ -113,30 +96,27 @@ def correlate_auth_events(events: List[TimestampedEvent]) -> List[Dict[str, Any]
         failed_attempts = [e for e in ip_events if e.event_type == "SSH_FAIL"]
         accepted_attempts = [e for e in ip_events if e.event_type == "SSH_ACCEPT"]
 
-        # Stage 1: Brute Force (> 5 failures)
         if len(failed_attempts) >= 5:
             incident = {
                 "id": f"INC-BF-{ip.replace('.', '-')}",
                 "severity": "HIGH",
                 "ip": ip,
                 "mitre": MITRE_TECHNIQUES["SSH_BRUTE_FORCE"],
-                "summary": f"Active SSH brute-force attack ({len(failed_attempts)} failed attempts)",
+                "summary": f"SSH brute-force activity ({len(failed_attempts)} failed attempts)",
                 "targeted_users": list(set(e.user for e in failed_attempts)),
                 "first_seen": failed_attempts[0].raw_ts,
                 "last_seen": failed_attempts[-1].raw_ts,
                 "chain_detected": False
             }
 
-            # Stage 2: Account Takeover check
             for acc in accepted_attempts:
-                # Check if acceptance occurred after brute-force within 10 minutes
                 if acc.timestamp >= failed_attempts[0].timestamp:
                     time_diff = (acc.timestamp - failed_attempts[-1].timestamp).total_seconds()
                     if 0 <= time_diff <= 600:
                         incident["severity"] = "CRITICAL"
                         incident["chain_detected"] = True
                         incident["compromised_user"] = acc.user
-                        incident["summary"] = f"CRITICAL: Account Takeover Chain Detected! Brute-force succeeded for user '{acc.user}'"
+                        incident["summary"] = f"Account takeover chain detected: brute-force succeeded for user '{acc.user}'"
                         incident["mitre_chain"] = [
                             MITRE_TECHNIQUES["SSH_BRUTE_FORCE"],
                             MITRE_TECHNIQUES["ACCOUNT_TAKEOVER"]
@@ -147,10 +127,6 @@ def correlate_auth_events(events: List[TimestampedEvent]) -> List[Dict[str, Any]
 
     return correlated_incidents
 
-
-# ==============================================================================
-# 3. AUTH LOG & WEB LOG TRIAGE PARSERS
-# ==============================================================================
 
 def triage_auth_log(lines: List[str]) -> Dict[str, Any]:
     events: List[TimestampedEvent] = []
@@ -207,13 +183,11 @@ def triage_web_log(lines: List[str]) -> Dict[str, Any]:
         ip_activity[ip] += 1
         ua_lower = user_agent.lower()
 
-        # Check scanner signatures
         for sc in SCANNER_USER_AGENTS:
             if sc in ua_lower:
                 scanner_hits[sc] += 1
                 break
 
-        # Check path exploit probes
         for pattern, cwe, attack_name in SUSPICIOUS_PATHS:
             if pattern.search(path):
                 probes.append({
@@ -251,35 +225,27 @@ def parse_and_triage(filepath: Path) -> Dict[str, Any]:
     elif "HTTP/" in sample or 'GET ' in sample or 'POST ' in sample:
         res = triage_web_log(lines)
     else:
-        # Dual-test fallback
         res = triage_auth_log(lines)
         if not res["correlated_incidents"] and not res["sudo_violations"]:
             res = triage_web_log(lines)
 
-    # 4. Generate Automated Containment Playbook (NIST SP 800-61 Containment Phase)
     containment_rules = []
     if res.get("log_type") == "auth":
         for inc in res.get("correlated_incidents", []):
             ip = inc["ip"]
-            containment_rules.append(f"iptables -A INPUT -s {ip} -j DROP # Mitigation for {inc['summary']}")
+            containment_rules.append(f"iptables -A INPUT -s {ip} -j DROP")
     elif res.get("log_type") == "web":
         flagged_ips = list(set(p["ip"] for p in res.get("exploit_samples", [])))
         for ip in flagged_ips[:10]:
-            containment_rules.append(f"iptables -A INPUT -s {ip} -j DROP # Web exploit mitigation")
+            containment_rules.append(f"iptables -A INPUT -s {ip} -j DROP")
 
     res["containment_firewall_rules"] = containment_rules
     return res
 
 
-# ==============================================================================
-# 4. CLI INTERFACE
-# ==============================================================================
-
 def main():
-    parser = argparse.ArgumentParser(
-        description="AEGIS AI - Incident Forensics & SIEM Correlation (Enterprise Edition)"
-    )
-    parser.add_argument("logfile", help="Path to log file (auth.log, access.log, syslog)")
+    parser = argparse.ArgumentParser(description="AEGIS Incident Forensics and SIEM Engine")
+    parser.add_argument("logfile", help="Path to log file")
     parser.add_argument("--json", action="store_true", help="Output results in JSON format")
 
     args = parser.parse_args()
@@ -294,16 +260,13 @@ def main():
         print(json.dumps(results, indent=2))
         return
 
-    print("\n╔═══════════════════════════════════════════════════════════════════════╗")
-    print("║        AEGIS AI - Incident Forensics & SIEM Correlation (v2.0)        ║")
-    print("╚═══════════════════════════════════════════════════════════════════════╝")
-    print(f" Target File:     {Path(args.logfile).name}")
-    print(f" Log Subsystem:   {results.get('log_type', 'unknown').upper()}")
+    print(f"\nTarget File:    {Path(args.logfile).name}")
+    print(f"Log Subsystem:  {results.get('log_type', 'unknown').upper()}")
 
     if results["log_type"] == "auth":
         incidents = results.get("correlated_incidents", [])
-        print(f" Total Incidents: {len(incidents)}")
-        print(f" Sudo Violations: {len(results.get('sudo_violations', []))}\n")
+        print(f"Total Incidents: {len(incidents)}")
+        print(f"Sudo Violations: {len(results.get('sudo_violations', []))}\n")
 
         for inc in incidents:
             color = "\033[91m" if inc["severity"] == "CRITICAL" else "\033[93m"
@@ -316,28 +279,28 @@ def main():
             print("-" * 75)
 
         if results["sudo_violations"]:
-            print("\n[!] Unauthorized Sudo Escalation Attempts:")
+            print("\nUnauthorized Sudo Escalation Attempts:")
             for s in results["sudo_violations"]:
                 print(f"  - [{s['timestamp']}] User: {s['user']} | Command: {s['command']} | ({s['mitre']['technique_id']})")
 
     elif results["log_type"] == "web":
-        print(f" Total Requests Analyzed:  {results['total_requests']}")
-        print(f" Exploit Probes Detected:  {results['exploit_probes_count']}")
-        print(f" Scanners Fingerprinted:   {sum(results['scanner_activity'].values())}\n")
+        print(f"Total Requests:  {results['total_requests']}")
+        print(f"Exploit Probes:  {results['exploit_probes_count']}")
+        print(f"Scanners:        {sum(results['scanner_activity'].values())}\n")
 
         if results["scanner_activity"]:
-            print("[!] Identified Security Scanner Fingerprints:")
+            print("Scanner Fingerprints:")
             for sc, count in results["scanner_activity"].items():
                 print(f"  - {sc}: {count} probes")
             print("-" * 75)
 
         if results["exploit_samples"]:
-            print("\n[!] Sample High-Risk Web Exploit Probes:")
+            print("\nHigh-Risk Exploit Probes:")
             for p in results["exploit_samples"][:8]:
                 print(f"  - [{p['ip']}] {p['attack']} ({p['cwe']}): {p['method']} {p['path']} -> HTTP {p['status']}")
 
     if results.get("containment_firewall_rules"):
-        print("\n[🛡️ NIST SP 800-61 Automated Containment Playbook]:")
+        print("\nContainment Rules:")
         for rule in results["containment_firewall_rules"][:5]:
             print(f"  \033[36m{rule}\033[0m")
 
