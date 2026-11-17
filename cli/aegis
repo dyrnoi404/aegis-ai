@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """
-AEGIS AI - Autonomous Security Analysis & Hardening CLI
+AEGIS AI - Autonomous Security Analysis & Hardening CLI (v2.0 Enterprise)
+Unified orchestrator for SAST, host posture, incident forensics, and reporting.
+
+Standards: NIST SP 800-61, MITRE ATT&CK, CIS Benchmarks, OWASP Top 10, CVSS v3.1.
 """
 
 import sys
@@ -12,9 +15,10 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from scripts.aegis_scan import scan_path
-from scripts.aegis_audit import run_audit
-from scripts.aegis_triage import analyze_log_file
+from scripts.aegis_scan import scan_target
+from scripts.aegis_audit import execute_host_audit
+from scripts.aegis_triage import parse_and_triage
+from scripts.aegis_report import generate_markdown_report
 
 BANNER = r"""
   █████╗ ███████╗ ██████╗ ██╗███████╗     █████╗ ██╗
@@ -23,101 +27,145 @@ BANNER = r"""
  ██╔══██║██╔══╝  ██║   ██║██║╚════██║    ██╔══██║██║
  ██║  ██║███████╗╚██████╔╝██║███████║    ██║  ██║██║
  ╚═╝  ╚═╝╚══════╝ ╚═════╝ ╚═╝╚══════╝    ╚═╝  ╚═╝╚═╝
-  Autonomous Security Analysis & Hardening Toolkit
+  Autonomous Security Architecture & Intelligence Toolkit (v2.0)
 """
 
-VERSION = "1.0.0"
+VERSION = "2.0.0"
 
 
 def cmd_scan(args):
     print(BANNER)
-    print(f"[*] Starting AEGIS Secret & Credential Scan: {args.target}")
-    findings = scan_path(args.target)
-    print(f"[+] Total findings: {len(findings)}\n")
+    print(f"[*] Initiating SAST & Secret Guard Scan: {Path(args.target).resolve()}")
+    findings = scan_target(args.target)
+    print(f"[+] Total Findings: {len(findings)}\n")
+
     if not findings:
-        print("[✓] Clean! No sensitive secrets or tokens detected.")
+        print("\033[92m[✓] CLEAN AUDIT: No high-entropy secrets, leaked tokens, or critical AST flaws detected.\033[0m\n")
     else:
         for f in findings:
-            print(f"[{f['severity']}] {f['rule']} ({f['id']})")
-            print(f"  File:    {f['file']}:{f['line']}")
-            print(f"  Snippet: {f['preview']}")
-            print(f"  Context: {f['context']}")
-            print("-" * 60)
-        if args.strict:
+            sev = f["severity"]
+            color = "\033[91m" if sev == "CRITICAL" else ("\033[93m" if sev == "HIGH" else "\033[94m")
+            print(f"[{color}{sev:<8}\033[0m] {f['rule']} [{f.get('cwe', 'CWE-798')}]")
+            print(f"  Location:    {f['file']}:{f['line']}")
+            print(f"  Snippet:     {f['preview']}")
+            print(f"  Context:     {f['context']}")
+            print(f"  Remediation: \033[36m{f.get('remediation', '')}\033[0m")
+            print("-" * 75)
+
+        if args.fail_on_findings:
             sys.exit(1)
 
 
 def cmd_audit(args):
     print(BANNER)
-    print("[*] Running AEGIS Linux Host Hardening Audit...")
-    res = run_audit()
+    print("[*] Running Deep Host Posture & Binary Hardening Audit...")
+    res = execute_host_audit()
     print(f"[+] Host:           {res['hostname']}")
-    print(f"[+] Security Grade: {res['grade']} ({res['score']}/100)")
-    print(f"[+] Total Checks:   {res['checks_count']}\n")
-    print(f"{'STATUS':<8} {'SEVERITY':<10} {'CHECK':<28} {'DETAILS'}")
-    print("=" * 75)
+    print(f"[+] CIS Score:      {res['score']}/100 (Grade: {res['grade']})")
+    print(f"[+] Total Audits:   {res['checks_total']}\n")
+
+    print(f"{'DOMAIN':<20} {'STATUS':<8} {'SEVERITY':<10} {'CHECK':<30} {'DETAILS'}")
+    print("=" * 95)
     for c in res["checks"]:
-        print(f"{c['status']:<8} {c['severity']:<10} {c['check']:<28} {c['detail']}")
+        st = c["status"]
+        st_color = "\033[92mPASS\033[0m" if st == "PASS" else ("\033[93mWARN\033[0m" if st == "WARN" else "\033[91mFAIL\033[0m")
+        print(f"{c['domain']:<20} {st_color:<17} {c['severity']:<10} {c['check']:<30} {c['detail']}")
     print("\n")
 
 
 def cmd_triage(args):
     print(BANNER)
-    print(f"[*] Triaging Log File: {args.logfile}")
-    res = analyze_log_file(Path(args.logfile))
-    if res["log_type"] == "auth":
-        print(f"[+] Failed SSH Logins:   {res['total_failed_ssh']}")
-        print(f"[+] Unique Suspect IPs:  {res['unique_attacker_ips']}")
-        print(f"[+] Brute-Force Status:  {'ATTACK DETECTED' if res['brute_force_detected'] else 'Normal'}")
-        if res["brute_force_offenders"]:
-            print("\n[!] Top Attackers:")
-            for ip, cnt in res["brute_force_offenders"].items():
-                print(f"    - {ip}: {cnt} failed attempts")
-        if res["sudo_violations"]:
-            print(f"\n[!] Unauthorized Sudo Commands: {len(res['sudo_violations'])}")
-            for v in res["sudo_violations"]:
-                print(f"    - User {v['user']}: {v['command']}")
-    elif res["log_type"] == "web":
+    print(f"[*] Triaging Incident Log: {Path(args.logfile).resolve()}")
+    res = parse_and_triage(Path(args.logfile))
+    log_type = res.get("log_type", "auth")
+    print(f"[+] Log Classification: {log_type.upper()}")
+
+    if log_type == "auth":
+        incidents = res.get("correlated_incidents", [])
+        print(f"[+] Multi-Stage Incidents Correlated: {len(incidents)}")
+        print(f"[+] Unauthorized Sudo Violations:     {len(res.get('sudo_violations', []))}\n")
+
+        for inc in incidents:
+            color = "\033[91m" if inc["severity"] == "CRITICAL" else "\033[93m"
+            print(f"[{color}{inc['severity']}\033[0m] {inc['summary']}")
+            print(f"  Attacker Origin:  {inc['ip']}")
+            print(f"  MITRE ATT&CK:     {inc['mitre']['technique_id']} ({inc['mitre']['technique_name']})")
+            print(f"  Targeted Users:   {', '.join(inc['targeted_users'])}")
+            print(f"  Timeline Window:  {inc['first_seen']} -> {inc['last_seen']}")
+            print("-" * 75)
+
+    elif log_type == "web":
         print(f"[+] Analyzed Web Requests: {res['total_requests']}")
         print(f"[+] Scanner Probes:        {sum(res['scanner_activity'].values())}")
-        print(f"[+] Exploit Attempts:      {res['exploit_attempts_count']}")
-        if res["exploit_samples"]:
-            print("\n[!] Sample Exploit Probes:")
-            for ex in res["exploit_samples"]:
-                print(f"    - {ex['ip']}: {ex['method']} {ex['path']} ({ex['status']})")
+        print(f"[+] Exploit Probes:        {res['exploit_probes_count']}\n")
+
+    if res.get("containment_firewall_rules"):
+        print("[🛡️ Automated Containment Playbook]:")
+        for rule in res["containment_firewall_rules"][:4]:
+            print(f"  \033[36m{rule}\033[0m")
     print("\n")
+
+
+def cmd_report(args):
+    print(BANNER)
+    print("[*] Generating Comprehensive NIST SP 800-61 Executive Report...")
+    scan_data = {"findings": scan_target(args.scan_path)} if args.scan_path else None
+    audit_data = execute_host_audit() if args.audit else None
+    triage_data = parse_and_triage(Path(args.log_file)) if args.log_file else None
+
+    report_md = generate_markdown_report(scan_data, audit_data, triage_data)
+    out_file = Path(args.out)
+    out_file.write_text(report_md, encoding="utf-8")
+    print(f"\033[92m[✓] Executive Report successfully compiled:\033[0m {out_file.resolve()}\n")
 
 
 def cmd_info(args):
     print(BANNER)
     print(f"Version:      {VERSION}")
-    print("Architecture: Agentic Security Skill & Standalone CLI")
-    print("Modules:")
-    print("  - scan:   Fast secret & API key leakage detector")
-    print("  - audit:  Linux host posture & hardening auditor")
-    print("  - triage: Incident forensics & log analyzer")
-    print("\nUsage in Agent: Available natively via 'aegis-security' skill.")
+    print("Architecture: Enterprise Security Skill & Zero-Dependency CLI")
+    print("Frameworks:   NIST SP 800-61 Rev. 2, MITRE ATT&CK v14, CIS, OWASP Top 10:2021, CVSS v3.1")
+    print("Core Engines:")
+    print("  • scan:   Shannon Entropy & Python AST Vulnerability Scanner (OWASP & CWE)")
+    print("  • audit:  Native ELF Checksec (NX, Canary, PIE, RELRO) & CIS Linux Hardener")
+    print("  • triage: Sliding Time-Window SIEM Forensics & Incident Correlator (NIST SP 800-61)")
+    print("  • report: Executive NIST SP 800-61 Report & CVSS v3.1 Base Score Calculator")
+    print("\nAgent Integration: Operating natively via 'aegis-security' skill.")
     print("\n")
 
 
 def main():
-    parser = argparse.ArgumentParser(prog="aegis", description="AEGIS AI - Security & Hardening Assistant")
+    parser = argparse.ArgumentParser(
+        prog="aegis",
+        description="AEGIS AI - Enterprise Security Architecture & Hardening Toolkit"
+    )
     parser.add_argument("--version", action="version", version=f"AEGIS AI v{VERSION}")
-    sub = parser.add_subparsers(dest="subcommand", help="Command to run")
+    sub = parser.add_subparsers(dest="subcommand", help="Operational mode")
 
-    p_scan = sub.add_parser("scan", help="Scan directory for leaked credentials & API keys")
-    p_scan.add_argument("target", nargs="?", default=".", help="Target path to scan")
-    p_scan.add_argument("--strict", action="store_true", help="Fail with exit code 1 on findings")
+    # scan
+    p_scan = sub.add_parser("scan", help="Run SAST & Secret Guard on codebase")
+    p_scan.add_argument("target", nargs="?", default=".", help="Target directory or file")
+    p_scan.add_argument("--fail-on-findings", action="store_true", help="Exit code 1 on findings")
     p_scan.set_defaults(func=cmd_scan)
 
-    p_audit = sub.add_parser("audit", help="Run Linux host security & hardening audit")
+    # audit
+    p_audit = sub.add_parser("audit", help="Run deep host posture & binary hardening audit")
     p_audit.set_defaults(func=cmd_audit)
 
-    p_triage = sub.add_parser("triage", help="Triage incident logs (auth.log, access.log)")
-    p_triage.add_argument("logfile", help="Path to log file")
+    # triage
+    p_triage = sub.add_parser("triage", help="Triage incident logs with SIEM correlation")
+    p_triage.add_argument("logfile", help="Path to auth or access log file")
     p_triage.set_defaults(func=cmd_triage)
 
-    p_info = sub.add_parser("info", help="Show system info and loaded modules")
+    # report
+    p_rep = sub.add_parser("report", help="Generate executive NIST SP 800-61 report")
+    p_rep.add_argument("--scan-path", help="Path to scan for SAST & secrets")
+    p_rep.add_argument("--audit", action="store_true", default=True, help="Include host audit in report")
+    p_rep.add_argument("--log-file", help="Path to incident log for triage")
+    p_rep.add_argument("--out", "-o", default="aegis_security_report.md", help="Output report filename")
+    p_rep.set_defaults(func=cmd_report)
+
+    # info
+    p_info = sub.add_parser("info", help="Show system capabilities and framework mappings")
     p_info.set_defaults(func=cmd_info)
 
     args = parser.parse_args()

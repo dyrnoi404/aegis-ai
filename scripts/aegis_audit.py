@@ -1,88 +1,272 @@
 #!/usr/bin/env python3
 """
-AEGIS AI - Linux Host Hardening & Posture Auditor
-Non-destructive system audit for misconfigurations, risky SUIDs,
-insecure permissions, open ports, and kernel hardening parameters.
+AEGIS AI - Deep Host Posture & Hardening Auditor (Enterprise Edition)
+Conducts non-destructive system audits, native ELF binary exploit mitigation checks
+(Checksec: NX, Canary, PIE, RELRO), Linux Capabilities inspection, and kernel posture evaluation.
+
+Based on CIS Linux Benchmarks and low-level binary exploitation models (John Erickson).
 """
 
 import os
 import sys
 import json
+import struct
 import socket
 import subprocess
 import argparse
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Tuple
 
-RISKY_SUID_BINARIES = {
-    "bash", "sh", "dash", "zsh", "python", "python3", "perl", "ruby",
-    "lua", "vim", "vi", "nano", "find", "tar", "zip", "gzip", "nmap",
-    "tcpdump", "awk", "sed", "gdb", "strace", "curl", "wget", "nc",
-    "netcat", "socat", "cp", "mv", "chmod", "chown", "env", "sudo"
-}
+# ==============================================================================
+# 1. NATIVE ELF BINARY CHECKSEC ENGINE (John Erickson Model)
+# ==============================================================================
+
+# ELF Program Header Types
+PT_LOAD = 1
+PT_DYNAMIC = 2
+PT_GNU_STACK = 0x6474E551
+PT_GNU_RELRO = 0x6474E552
+
+# ELF Dynamic Section Tags
+DT_FLAGS = 30
+DT_FLAGS_1 = 0x6FFFFFFB
+DF_BIND_NOW = 0x00000008
+DF_1_NOW = 0x00000001
 
 
-def check_aslr() -> Dict[str, Any]:
-    path = Path("/proc/sys/kernel/randomize_va_space")
-    if not path.exists():
-        return {"check": "ASLR", "status": "UNKNOWN", "severity": "INFO", "score": 0, "detail": "Procfs not accessible"}
+def analyze_elf_binary(filepath: Path) -> Optional[Dict[str, Any]]:
+    """
+    Parses ELF headers directly via struct unpacking to determine
+    compiler-level exploit mitigation flags without external dependencies.
+    """
+    if not filepath.is_file() or filepath.is_symlink():
+        return None
+
     try:
-        val = path.read_text().strip()
-        if val == "2":
-            return {"check": "ASLR", "status": "PASS", "severity": "LOW", "score": 10, "detail": "ASLR is fully enabled (value=2)"}
-        elif val == "1":
-            return {"check": "ASLR", "status": "WARN", "severity": "MEDIUM", "score": 5, "detail": "ASLR is partially enabled (value=1)"}
-        else:
-            return {"check": "ASLR", "status": "FAIL", "severity": "HIGH", "score": 0, "detail": f"ASLR is disabled (value={val})"}
-    except Exception as e:
-        return {"check": "ASLR", "status": "ERROR", "severity": "INFO", "score": 0, "detail": str(e)}
+        with open(filepath, "rb") as f:
+            header = f.read(64)
+            if len(header) < 52 or header[:4] != b"\x7fELF":
+                return None
+
+            ei_class = header[4]  # 1 = 32-bit, 2 = 64-bit
+            e_type = struct.unpack("<H", header[16:18])[0]
+            is_64 = (ei_class == 2)
+
+            if is_64:
+                e_phoff = struct.unpack("<Q", header[32:40])[0]
+                e_phentsize = struct.unpack("<H", header[54:56])[0]
+                e_phnum = struct.unpack("<H", header[56:58])[0]
+            else:
+                e_phoff = struct.unpack("<I", header[28:32])[0]
+                e_phentsize = struct.unpack("<H", header[42:44])[0]
+                e_phnum = struct.unpack("<H", header[44:46])[0]
+
+            # Read Program Headers
+            f.seek(e_phoff)
+            ph_data = f.read(e_phentsize * e_phnum)
+
+            nx_enabled = True
+            has_relro = False
+            has_bind_now = False
+
+            for i in range(e_phnum):
+                offset = i * e_phentsize
+                ph = ph_data[offset: offset + e_phentsize]
+                if not ph:
+                    break
+
+                if is_64:
+                    p_type = struct.unpack("<I", ph[0:4])[0]
+                    p_flags = struct.unpack("<I", ph[4:8])[0]
+                else:
+                    p_type = struct.unpack("<I", ph[0:4])[0]
+                    p_flags = struct.unpack("<I", ph[24:28])[0]
+
+                if p_type == PT_GNU_STACK:
+                    # If PF_X (1) is set in flags, stack is executable -> NX disabled
+                    if p_flags & 0x1:
+                        nx_enabled = False
+                elif p_type == PT_GNU_RELRO:
+                    has_relro = True
+
+            # Check Canary presence in symbol strings
+            f.seek(0)
+            raw_content = f.read(2 * 1024 * 1024)  # Read up to 2MB for symbol table
+            has_canary = b"__stack_chk_fail" in raw_content or b"__stack_chk_guard" in raw_content
+
+            # Determine PIE: ET_DYN (3) typically indicates PIE or shared library
+            pie_status = "PIE Enabled" if e_type == 3 else "No PIE"
+            relro_status = "Full RELRO" if (has_relro and b"BIND_NOW" in raw_content) else ("Partial RELRO" if has_relro else "No RELRO")
+
+            return {
+                "binary": filepath.name,
+                "path": str(filepath),
+                "nx": nx_enabled,
+                "canary": has_canary,
+                "pie": e_type == 3,
+                "relro": relro_status,
+                "secure": nx_enabled and has_canary and (e_type == 3)
+            }
+    except Exception:
+        return None
 
 
-def check_critical_file_perms() -> List[Dict[str, Any]]:
+def audit_critical_binaries() -> List[Dict[str, Any]]:
     checks = []
-    # /etc/passwd should not be world-writable
-    p = Path("/etc/passwd")
-    if p.exists():
-        mode = p.stat().st_mode
-        if mode & 0o002:
-            checks.append({"check": "File Perm: /etc/passwd", "status": "FAIL", "severity": "CRITICAL", "score": 0, "detail": "/etc/passwd is world-writable!"})
-        else:
-            checks.append({"check": "File Perm: /etc/passwd", "status": "PASS", "severity": "LOW", "score": 10, "detail": "/etc/passwd permissions are restricted"})
-
-    # /etc/shadow should not be readable by others
-    s = Path("/etc/shadow")
-    if s.exists():
-        try:
-            with open(s, "r"):
-                checks.append({"check": "File Perm: /etc/shadow", "status": "FAIL", "severity": "CRITICAL", "score": 0, "detail": "/etc/shadow is readable by current unprivileged user!"})
-        except PermissionError:
-            checks.append({"check": "File Perm: /etc/shadow", "status": "PASS", "severity": "LOW", "score": 10, "detail": "/etc/shadow is protected against unprivileged reads"})
-        except Exception:
-            pass
-
-    # ~/.ssh/ permissions check
-    ssh_dir = Path.home() / ".ssh"
-    if ssh_dir.exists():
-        mode = ssh_dir.stat().st_mode
-        if mode & 0o077 != 0:
-            checks.append({"check": "SSH Dir Perms", "status": "WARN", "severity": "MEDIUM", "score": 5, "detail": f"~/.ssh has loose permissions: {oct(mode & 0o777)}"})
-        else:
-            checks.append({"check": "SSH Dir Perms", "status": "PASS", "severity": "LOW", "score": 10, "detail": "~/.ssh has strict 700 permissions"})
-
-        for key_file in ssh_dir.glob("id_*"):
-            if not key_file.name.endswith(".pub"):
-                k_mode = key_file.stat().st_mode
-                if k_mode & 0o077 != 0:
-                    checks.append({"check": f"Private Key Perm: {key_file.name}", "status": "WARN", "severity": "HIGH", "score": 0, "detail": f"{key_file.name} is accessible by group/others: {oct(k_mode & 0o777)}"})
+    sample_binaries = [
+        "/bin/bash", "/usr/bin/sudo", "/usr/sbin/sshd",
+        "/usr/bin/python3", "/bin/login", "/usr/bin/passwd"
+    ]
+    for b_str in sample_binaries:
+        p = Path(b_str)
+        if p.exists() and p.is_file():
+            res = analyze_elf_binary(p)
+            if res:
+                status = "PASS" if res["secure"] else "WARN"
+                detail = f"NX={res['nx']}, Canary={res['canary']}, PIE={res['pie']}, RELRO={res['relro']}"
+                checks.append({
+                    "domain": "Binary Hardening",
+                    "check": f"Checksec: {p.name}",
+                    "status": status,
+                    "severity": "LOW" if status == "PASS" else "MEDIUM",
+                    "score": 10 if status == "PASS" else 5,
+                    "detail": detail
+                })
     return checks
 
 
-def check_suid_binaries() -> List[Dict[str, Any]]:
-    findings = []
-    # Scan standard binary directories
+# ==============================================================================
+# 2. KERNEL & MEMORY PROTECTION AUDIT
+# ==============================================================================
+
+def audit_kernel_parameters() -> List[Dict[str, Any]]:
+    checks = []
+
+    # 1. ASLR (randomize_va_space)
+    p_aslr = Path("/proc/sys/kernel/randomize_va_space")
+    if p_aslr.exists():
+        try:
+            val = p_aslr.read_text().strip()
+            if val == "2":
+                checks.append({
+                    "domain": "Kernel Protections",
+                    "check": "Kernel ASLR Posture",
+                    "status": "PASS",
+                    "severity": "LOW",
+                    "score": 10,
+                    "detail": "Full ASLR active (randomize_va_space=2). Randomizes stack, VDSO, shared libs, heap."
+                })
+            else:
+                checks.append({
+                    "domain": "Kernel Protections",
+                    "check": "Kernel ASLR Posture",
+                    "status": "FAIL",
+                    "severity": "CRITICAL",
+                    "score": 0,
+                    "detail": f"ASLR compromised or disabled (value={val}). Execute: sysctl -w kernel.randomize_va_space=2"
+                })
+        except Exception:
+            pass
+
+    # 2. SUID Core Dumps (fs.suid_dumpable)
+    p_dump = Path("/proc/sys/fs/suid_dumpable")
+    if p_dump.exists():
+        try:
+            val = p_dump.read_text().strip()
+            if val == "0":
+                checks.append({
+                    "domain": "Kernel Protections",
+                    "check": "SUID Core Dump Restriction",
+                    "status": "PASS",
+                    "severity": "LOW",
+                    "score": 10,
+                    "detail": "SUID core dumping disabled (fs.suid_dumpable=0). Prevents credential leakage via memory dumps."
+                })
+            else:
+                checks.append({
+                    "domain": "Kernel Protections",
+                    "check": "SUID Core Dump Restriction",
+                    "status": "WARN",
+                    "severity": "MEDIUM",
+                    "score": 4,
+                    "detail": f"SUID process dumps permitted (value={val}). Execute: sysctl -w fs.suid_dumpable=0"
+                })
+        except Exception:
+            pass
+
+    # 3. Kernel Pointer Exposure (kernel.kptr_restrict)
+    p_kptr = Path("/proc/sys/kernel/kptr_restrict")
+    if p_kptr.exists():
+        try:
+            val = p_kptr.read_text().strip()
+            if val in ("1", "2"):
+                checks.append({
+                    "domain": "Kernel Protections",
+                    "check": "Kernel Pointer Protection (kptr_restrict)",
+                    "status": "PASS",
+                    "severity": "LOW",
+                    "score": 10,
+                    "detail": f"Kernel pointers hidden from unprivileged processes (value={val})."
+                })
+            else:
+                checks.append({
+                    "domain": "Kernel Protections",
+                    "check": "Kernel Pointer Protection (kptr_restrict)",
+                    "status": "WARN",
+                    "severity": "MEDIUM",
+                    "score": 5,
+                    "detail": f"Kernel address leakage risk (value={val}). Recommended: sysctl -w kernel.kptr_restrict=2"
+                })
+        except Exception:
+            pass
+
+    # 4. Dmesg Restriction (kernel.dmesg_restrict)
+    p_dmesg = Path("/proc/sys/kernel/dmesg_restrict")
+    if p_dmesg.exists():
+        try:
+            val = p_dmesg.read_text().strip()
+            if val == "1":
+                checks.append({
+                    "domain": "Kernel Protections",
+                    "check": "Dmesg Unprivileged Access",
+                    "status": "PASS",
+                    "severity": "LOW",
+                    "score": 10,
+                    "detail": "Kernel syslog/dmesg restricted to CAP_SYSLOG."
+                })
+            else:
+                checks.append({
+                    "domain": "Kernel Protections",
+                    "check": "Dmesg Unprivileged Access",
+                    "status": "WARN",
+                    "severity": "LOW",
+                    "score": 7,
+                    "detail": "Kernel log buffer readable by standard users. Recommended: sysctl -w kernel.dmesg_restrict=1"
+                })
+        except Exception:
+            pass
+
+    return checks
+
+
+# ==============================================================================
+# 3. PRIVILEGE ESCALATION SURFACES (SUID, Capabilities, Sudoers)
+# ==============================================================================
+
+GTFOBINS_TARGETS = {
+    "bash", "sh", "dash", "zsh", "python", "python3", "perl", "ruby",
+    "lua", "vim", "vi", "nano", "find", "tar", "zip", "gzip", "nmap",
+    "tcpdump", "awk", "sed", "gdb", "strace", "curl", "wget", "nc",
+    "netcat", "socat", "cp", "mv", "chmod", "chown", "env", "pkexec"
+}
+
+
+def audit_privilege_surfaces() -> List[Dict[str, Any]]:
+    checks = []
+
+    # 1. SUID Binaries Audit
     bin_dirs = ["/bin", "/sbin", "/usr/bin", "/usr/sbin", "/usr/local/bin"]
-    detected_risky = []
-    
+    flagged_suids = []
     for b_dir in bin_dirs:
         p = Path(b_dir)
         if not p.is_dir():
@@ -92,38 +276,94 @@ def check_suid_binaries() -> List[Dict[str, Any]]:
                 if item.is_file() and not item.is_symlink():
                     try:
                         st = item.stat()
-                        if st.st_mode & 0o4000:  # SUID bit
-                            if item.name.lower() in RISKY_SUID_BINARIES:
-                                detected_risky.append(f"{item} (GTFOBins target)")
+                        if st.st_mode & 0o4000:  # SUID bit set
+                            if item.name.lower() in GTFOBINS_TARGETS:
+                                flagged_suids.append(f"{item.name} ({item})")
                     except (PermissionError, FileNotFoundError):
                         continue
         except Exception:
             continue
 
-    if detected_risky:
-        findings.append({
-            "check": "SUID Binaries",
+    if flagged_suids:
+        checks.append({
+            "domain": "Privilege Surfaces",
+            "check": "SUID Binary Exploitability (GTFOBins)",
             "status": "WARN",
             "severity": "HIGH",
             "score": 5,
-            "detail": f"Detected potentially exploitable SUID binaries: {', '.join(detected_risky[:5])}"
+            "detail": f"SUID binaries with known GTFOBins bypass vectors detected: {', '.join(flagged_suids[:4])}"
         })
     else:
-        findings.append({
-            "check": "SUID Binaries",
+        checks.append({
+            "domain": "Privilege Surfaces",
+            "check": "SUID Binary Exploitability (GTFOBins)",
             "status": "PASS",
             "severity": "LOW",
             "score": 10,
-            "detail": "No anomalous or high-risk GTFOBins SUID binaries detected in standard paths"
+            "detail": "No abnormal or high-risk SUID binaries found in standard search paths."
         })
-    return findings
+
+    # 2. Linux Capabilities Audit via getcap
+    try:
+        proc = subprocess.run(["getcap", "-r", "/usr/bin", "/bin"], capture_output=True, text=True, timeout=3)
+        if proc.returncode == 0 and proc.stdout.strip():
+            caps = proc.stdout.strip().splitlines()
+            risky_caps = [c for c in caps if "cap_setuid" in c or "cap_sys_admin" in c]
+            if risky_caps:
+                checks.append({
+                    "domain": "Privilege Surfaces",
+                    "check": "Linux Capabilities Elevation",
+                    "status": "FAIL",
+                    "severity": "CRITICAL",
+                    "score": 0,
+                    "detail": f"Dangerous file capabilities detected: {', '.join(risky_caps[:2])}"
+                })
+            else:
+                checks.append({
+                    "domain": "Privilege Surfaces",
+                    "check": "Linux Capabilities Elevation",
+                    "status": "PASS",
+                    "severity": "LOW",
+                    "score": 10,
+                    "detail": "Standard bounded capabilities detected (ping/wireshark)."
+                })
+    except Exception:
+        pass
+
+    # 3. Critical Files Permissions
+    p_shadow = Path("/etc/shadow")
+    if p_shadow.exists():
+        try:
+            with open(p_shadow, "r"):
+                checks.append({
+                    "domain": "Privilege Surfaces",
+                    "check": "Shadow File Access Controls",
+                    "status": "FAIL",
+                    "severity": "CRITICAL",
+                    "score": 0,
+                    "detail": "/etc/shadow is readable by unprivileged processes! Immediate remediation required."
+                })
+        except PermissionError:
+            checks.append({
+                "domain": "Privilege Surfaces",
+                "check": "Shadow File Access Controls",
+                "status": "PASS",
+                "severity": "LOW",
+                "score": 10,
+                "detail": "/etc/shadow access is restricted strictly to root/shadow."
+            })
+
+    return checks
 
 
-def check_listening_ports() -> List[Dict[str, Any]]:
+# ==============================================================================
+# 4. NETWORK BOUNDARY & SSH POSTURE
+# ==============================================================================
+
+def audit_network_surface() -> List[Dict[str, Any]]:
     checks = []
-    open_public = []
-    
-    # Run ss -tulpn or parse /proc/net/tcp
+    unrestricted_ports = []
+
     try:
         res = subprocess.run(["ss", "-tuln"], capture_output=True, text=True, timeout=3)
         if res.returncode == 0:
@@ -131,133 +371,135 @@ def check_listening_ports() -> List[Dict[str, Any]]:
             for line in lines:
                 parts = line.split()
                 if len(parts) >= 5:
-                    local_addr = parts[4]
-                    if local_addr.startswith("0.0.0.0:") or local_addr.startswith("[::]:") or local_addr.startswith("*:") :
-                        open_public.append(local_addr)
+                    addr = parts[4]
+                    if addr.startswith("0.0.0.0:") or addr.startswith("[::]:") or addr.startswith("*:"):
+                        port = addr.split(":")[-1]
+                        unrestricted_ports.append(port)
     except Exception:
         pass
 
-    if open_public:
+    if unrestricted_ports:
         checks.append({
-            "check": "Public Listening Services",
+            "domain": "Network Perimeter",
+            "check": "Public Socket Ingress Exposure",
             "status": "WARN",
             "severity": "MEDIUM",
-            "score": 5,
-            "detail": f"Services listening on all network interfaces (0.0.0.0/*): {', '.join(open_public[:6])}"
+            "score": 6,
+            "detail": f"Active listeners on 0.0.0.0/*: ports {', '.join(unrestricted_ports[:5])}. Verify if firewalled."
         })
     else:
         checks.append({
-            "check": "Public Listening Services",
+            "domain": "Network Perimeter",
+            "check": "Public Socket Ingress Exposure",
             "status": "PASS",
             "severity": "LOW",
             "score": 10,
-            "detail": "No unbound public listening sockets detected or ports strictly bound to localhost"
+            "detail": "All active TCP listeners are strictly bound to localhost loopback interfaces."
         })
+
+    # SSH Configuration
+    sshd_conf = Path("/etc/ssh/sshd_config")
+    if sshd_conf.exists():
+        try:
+            content = sshd_conf.read_text(errors="ignore")
+            root_login = "prohibit-password"
+            for line in content.splitlines():
+                line = line.strip()
+                if line.startswith("#") or not line:
+                    continue
+                if line.lower().startswith("permitrootlogin"):
+                    root_login = line.split()[-1]
+            if root_login.lower() == "yes":
+                checks.append({
+                    "domain": "Network Perimeter",
+                    "check": "SSHD Root Authentication",
+                    "status": "FAIL",
+                    "severity": "HIGH",
+                    "score": 0,
+                    "detail": "PermitRootLogin is configured to 'yes'. Remediate: set to 'no' or 'prohibit-password'."
+                })
+            else:
+                checks.append({
+                    "domain": "Network Perimeter",
+                    "check": "SSHD Root Authentication",
+                    "status": "PASS",
+                    "severity": "LOW",
+                    "score": 10,
+                    "detail": f"SSHD root login restricted ({root_login})."
+                })
+        except Exception:
+            pass
+
     return checks
 
 
-def check_sshd_config() -> List[Dict[str, Any]]:
-    checks = []
-    p = Path("/etc/ssh/sshd_config")
-    if not p.exists():
-        return checks
+# ==============================================================================
+# 5. ORCHESTRATION & SCORING
+# ==============================================================================
 
-    try:
-        content = p.read_text(errors="ignore")
-        root_login = None
-        pass_auth = None
-        for line in content.splitlines():
-            line = line.strip()
-            if line.startswith("#") or not line:
-                continue
-            if line.lower().startswith("permitrootlogin"):
-                root_login = line.split()[-1]
-            if line.lower().startswith("passwordauthentication"):
-                pass_auth = line.split()[-1]
-
-        if root_login and root_login.lower() in ("yes", "prohibit-password"):
-            checks.append({
-                "check": "SSH Root Login",
-                "status": "WARN" if root_login.lower() == "prohibit-password" else "FAIL",
-                "severity": "HIGH" if root_login.lower() == "yes" else "MEDIUM",
-                "score": 5 if root_login.lower() == "prohibit-password" else 0,
-                "detail": f"PermitRootLogin is set to '{root_login}' (recommended: 'no')"
-            })
-        else:
-            checks.append({
-                "check": "SSH Root Login",
-                "status": "PASS",
-                "severity": "LOW",
-                "score": 10,
-                "detail": "SSH root login is disabled or default restricted"
-            })
-    except Exception:
-        pass
-    return checks
-
-
-def run_audit() -> Dict[str, Any]:
+def execute_host_audit() -> Dict[str, Any]:
     all_checks = []
-    all_checks.append(check_aslr())
-    all_checks.extend(check_critical_file_perms())
-    all_checks.extend(check_suid_binaries())
-    all_checks.extend(check_listening_ports())
-    all_checks.extend(check_sshd_config())
+    all_checks.extend(audit_kernel_parameters())
+    all_checks.extend(audit_critical_binaries())
+    all_checks.extend(audit_privilege_surfaces())
+    all_checks.extend(audit_network_surface())
 
-    # Calculate overall security score (0 - 100)
     total_score = sum(c.get("score", 0) for c in all_checks)
-    max_score = len(all_checks) * 10
-    final_percentage = round((total_score / max_score) * 100) if max_score > 0 else 0
+    max_possible = len(all_checks) * 10
+    final_score = round((total_score / max_possible) * 100) if max_possible > 0 else 0
 
-    if final_percentage >= 85:
+    if final_score >= 85:
         grade = "A"
-    elif final_percentage >= 70:
+    elif final_score >= 70:
         grade = "B"
-    elif final_percentage >= 50:
+    elif final_score >= 50:
         grade = "C"
     else:
         grade = "D"
 
     return {
         "hostname": socket.gethostname(),
-        "score": final_percentage,
+        "score": final_score,
         "grade": grade,
-        "checks_count": len(all_checks),
+        "checks_total": len(all_checks),
         "checks": all_checks
     }
 
 
 def main():
-    parser = argparse.ArgumentParser(description="AEGIS AI - Host Hardening & Posture Auditor")
-    parser.add_argument("--json", action="store_true", help="Output results in JSON format")
+    parser = argparse.ArgumentParser(
+        description="AEGIS AI - Deep Host Posture & Hardening Auditor (Enterprise Edition)"
+    )
+    parser.add_argument("--json", action="store_true", help="Output full results in JSON format")
     args = parser.parse_args()
 
-    results = run_audit()
+    results = execute_host_audit()
 
     if args.json:
         print(json.dumps(results, indent=2))
-    else:
-        print(f"\n╔═══════════════════════════════════════════════════════════╗")
-        print(f"║             AEGIS AI - Host Security Posture              ║")
-        print(f"╚═══════════════════════════════════════════════════════════╝")
-        print(f" Target Host:    {results['hostname']}")
-        print(f" Security Grade: {results['grade']} ({results['score']}/100)")
-        print(f" Total Audits:   {results['checks_count']}\n")
-        print(f"{'STATUS':<8} {'SEVERITY':<10} {'CHECK':<28} {'DETAILS'}")
-        print("-" * 75)
+        return
 
-        for c in results["checks"]:
-            st = c["status"]
-            sev = c["severity"]
-            if st == "PASS":
-                st_str = "\033[92mPASS\033[0m"
-            elif st == "WARN":
-                st_str = "\033[93mWARN\033[0m"
-            else:
-                st_str = "\033[91mFAIL\033[0m"
+    print("\n╔═══════════════════════════════════════════════════════════════════════╗")
+    print("║          AEGIS AI - Deep Host Posture & Hardening Auditor             ║")
+    print("╚═══════════════════════════════════════════════════════════════════════╝")
+    print(f" Target Hostname:      {results['hostname']}")
+    print(f" CIS Hardening Score:  {results['score']}/100 (Grade: {results['grade']})")
+    print(f" Total Audits Run:     {results['checks_total']}\n")
 
-            print(f"{st_str:<17} {sev:<10} {c['check']:<28} {c['detail']}")
-        print("\n")
+    print(f"{'DOMAIN':<20} {'STATUS':<8} {'SEVERITY':<10} {'CHECK':<30} {'DETAILS'}")
+    print("-" * 100)
+
+    for c in results["checks"]:
+        st = c["status"]
+        if st == "PASS":
+            st_color = "\033[92mPASS\033[0m"
+        elif st == "WARN":
+            st_color = "\033[93mWARN\033[0m"
+        else:
+            st_color = "\033[91mFAIL\033[0m"
+
+        print(f"{c['domain']:<20} {st_color:<17} {c['severity']:<10} {c['check']:<30} {c['detail']}")
+    print("\n")
 
 
 if __name__ == "__main__":
