@@ -1,54 +1,131 @@
 #!/usr/bin/env python3
-"""AEGIS CLI - improved minimal entrypoint"""
+"""
+AEGIS AI - Autonomous Security Analysis & Hardening CLI
+"""
+
 import sys
 import argparse
 from pathlib import Path
 
+# Add project root to sys.path
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from scripts.aegis_scan import scan_path
+from scripts.aegis_audit import run_audit
+from scripts.aegis_triage import analyze_log_file
+
 BANNER = r"""
-╔══════════════════════╗
-║       AEGIS AI       ║
-║ Cyber Intelligence   ║
-╚══════════════════════╝
+  █████╗ ███████╗ ██████╗ ██╗███████╗     █████╗ ██╗
+ ██╔══██╗██╔════╝██╔════╝ ██║██╔════╝    ██╔══██╗██║
+ ███████║█████╗  ██║  ███╗██║███████╗    ███████║██║
+ ██╔══██║██╔══╝  ██║   ██║██║╚════██║    ██╔══██║██║
+ ██║  ██║███████╗╚██████╔╝██║███████║    ██║  ██║██║
+ ╚═╝  ╚═╝╚══════╝ ╚═════╝ ╚═╝╚══════╝    ╚═╝  ╚═╝╚═╝
+  Autonomous Security Analysis & Hardening Toolkit
 """
 
-VERSION = "0.1.0"
+VERSION = "1.0.0"
+
+
+def cmd_scan(args):
+    print(BANNER)
+    print(f"[*] Starting AEGIS Secret & Credential Scan: {args.target}")
+    findings = scan_path(args.target)
+    print(f"[+] Total findings: {len(findings)}\n")
+    if not findings:
+        print("[✓] Clean! No sensitive secrets or tokens detected.")
+    else:
+        for f in findings:
+            print(f"[{f['severity']}] {f['rule']} ({f['id']})")
+            print(f"  File:    {f['file']}:{f['line']}")
+            print(f"  Snippet: {f['preview']}")
+            print(f"  Context: {f['context']}")
+            print("-" * 60)
+        if args.strict:
+            sys.exit(1)
+
+
+def cmd_audit(args):
+    print(BANNER)
+    print("[*] Running AEGIS Linux Host Hardening Audit...")
+    res = run_audit()
+    print(f"[+] Host:           {res['hostname']}")
+    print(f"[+] Security Grade: {res['grade']} ({res['score']}/100)")
+    print(f"[+] Total Checks:   {res['checks_count']}\n")
+    print(f"{'STATUS':<8} {'SEVERITY':<10} {'CHECK':<28} {'DETAILS'}")
+    print("=" * 75)
+    for c in res["checks"]:
+        print(f"{c['status']:<8} {c['severity']:<10} {c['check']:<28} {c['detail']}")
+    print("\n")
+
+
+def cmd_triage(args):
+    print(BANNER)
+    print(f"[*] Triaging Log File: {args.logfile}")
+    res = analyze_log_file(Path(args.logfile))
+    if res["log_type"] == "auth":
+        print(f"[+] Failed SSH Logins:   {res['total_failed_ssh']}")
+        print(f"[+] Unique Suspect IPs:  {res['unique_attacker_ips']}")
+        print(f"[+] Brute-Force Status:  {'ATTACK DETECTED' if res['brute_force_detected'] else 'Normal'}")
+        if res["brute_force_offenders"]:
+            print("\n[!] Top Attackers:")
+            for ip, cnt in res["brute_force_offenders"].items():
+                print(f"    - {ip}: {cnt} failed attempts")
+        if res["sudo_violations"]:
+            print(f"\n[!] Unauthorized Sudo Commands: {len(res['sudo_violations'])}")
+            for v in res["sudo_violations"]:
+                print(f"    - User {v['user']}: {v['command']}")
+    elif res["log_type"] == "web":
+        print(f"[+] Analyzed Web Requests: {res['total_requests']}")
+        print(f"[+] Scanner Probes:        {sum(res['scanner_activity'].values())}")
+        print(f"[+] Exploit Attempts:      {res['exploit_attempts_count']}")
+        if res["exploit_samples"]:
+            print("\n[!] Sample Exploit Probes:")
+            for ex in res["exploit_samples"]:
+                print(f"    - {ex['ip']}: {ex['method']} {ex['path']} ({ex['status']})")
+    print("\n")
 
 
 def cmd_info(args):
     print(BANNER)
-    print(f"Version: {VERSION}\n")
-    print("Model:\n - Qwen Local (placeholder)\n")
-    print("Memory:\n - Enabled (placeholder)\n")
-    print("Modules:\n - Analyzer\n - Knowledge\n - Reporter\n")
+    print(f"Version:      {VERSION}")
+    print("Architecture: Agentic Security Skill & Standalone CLI")
+    print("Modules:")
+    print("  - scan:   Fast secret & API key leakage detector")
+    print("  - audit:  Linux host posture & hardening auditor")
+    print("  - triage: Incident forensics & log analyzer")
+    print("\nUsage in Agent: Available natively via 'aegis-security' skill.")
+    print("\n")
 
 
-def cmd_run(args):
-    print("Starting AEGIS (placeholder)...")
-    # TODO: start API or local services
+def main():
+    parser = argparse.ArgumentParser(prog="aegis", description="AEGIS AI - Security & Hardening Assistant")
+    parser.add_argument("--version", action="version", version=f"AEGIS AI v{VERSION}")
+    sub = parser.add_subparsers(dest="subcommand", help="Command to run")
 
+    p_scan = sub.add_parser("scan", help="Scan directory for leaked credentials & API keys")
+    p_scan.add_argument("target", nargs="?", default=".", help="Target path to scan")
+    p_scan.add_argument("--strict", action="store_true", help="Fail with exit code 1 on findings")
+    p_scan.set_defaults(func=cmd_scan)
 
-def main(argv=None):
-    parser = argparse.ArgumentParser(prog="aegis")
-    parser.add_argument("--version", action="store_true", help="Show version and exit")
-    sub = parser.add_subparsers(dest="cmd")
+    p_audit = sub.add_parser("audit", help="Run Linux host security & hardening audit")
+    p_audit.set_defaults(func=cmd_audit)
 
-    p_info = sub.add_parser("info", help="Show system info")
+    p_triage = sub.add_parser("triage", help="Triage incident logs (auth.log, access.log)")
+    p_triage.add_argument("logfile", help="Path to log file")
+    p_triage.set_defaults(func=cmd_triage)
+
+    p_info = sub.add_parser("info", help="Show system info and loaded modules")
     p_info.set_defaults(func=cmd_info)
 
-    p_run = sub.add_parser("run", help="Run local stack (placeholder)")
-    p_run.set_defaults(func=cmd_run)
-
-    args = parser.parse_args(argv)
-
-    if args.version:
-        print(VERSION)
-        return 0
-
+    args = parser.parse_args()
     if hasattr(args, "func"):
         args.func(args)
     else:
-        parser.print_help()
+        cmd_info(None)
 
 
-if __name__ == '__main__':
-    sys.exit(main())
+if __name__ == "__main__":
+    main()
